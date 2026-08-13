@@ -14,6 +14,7 @@ from optionstruct import (
     PricingInputs,
     bs_delta,
     bs_gamma,
+    bs_price,
     bs_theta,
     bs_vega,
     greeks,
@@ -21,6 +22,8 @@ from optionstruct import (
     opening_limit_credit,
     round_to_tick,
 )
+
+D = Decimal
 
 
 def _f(d: Decimal) -> float:
@@ -210,3 +213,53 @@ def test_tick_rounding_can_land_below_the_natural_floor():
                                  entry_offset=Decimal('0.25'), tick=NICKEL)
     assert limit == Decimal('1.25')
     assert limit < Decimal('1.28')
+
+
+# ── bs_price ─────────────────────────────────────────────────────────────────
+
+
+def _bs(option_type, *, s='100', k='100', t='1', vol='0.20', r='0', q='0'):
+    return PricingInputs(
+        option_type=option_type, spot=D(s), strike=D(k),
+        time_to_expiration_years=D(t), volatility=D(vol),
+        risk_free_rate=D(r), dividend_yield=D(q))
+
+
+def test_bs_price_matches_a_published_reference():
+    """S=100, K=100, T=1, sigma=20%, r=5%, q=0 — the standard textbook case.
+    Call 10.4506, put 5.5735 (Hull, Options Futures and Other Derivatives)."""
+    call = bs_price(_bs(OptionType.CALL, r='0.05'))
+    put = bs_price(_bs(OptionType.PUT, r='0.05'))
+    assert abs(float(call) - 10.4506) < 0.001
+    assert abs(float(put) - 5.5735) < 0.001
+
+
+def test_put_call_parity_holds():
+    """C - P = S e^{-qT} - K e^{-rT}. Parity is arbitrage, not a model choice, so
+    a violation means the discounting is wrong rather than the volatility."""
+    import math
+    c = float(bs_price(_bs(OptionType.CALL, s='105', k='100', r='0.04', q='0.02')))
+    p = float(bs_price(_bs(OptionType.PUT, s='105', k='100', r='0.04', q='0.02')))
+    expected = 105 * math.exp(-0.02) - 100 * math.exp(-0.04)
+    assert abs((c - p) - expected) < 1e-9
+
+
+def test_price_is_never_below_intrinsic():
+    """A deep ITM option cannot be worth less than exercising it."""
+    deep = bs_price(_bs(OptionType.CALL, s='150', k='100', t='0.5', vol='0.15'))
+    assert float(deep) >= 50 - 1e-9
+
+
+def test_price_rises_with_volatility_for_both_rights():
+    for right in (OptionType.CALL, OptionType.PUT):
+        low = bs_price(_bs(right, vol='0.10'))
+        high = bs_price(_bs(right, vol='0.40'))
+        assert high > low, f'{right} must be worth more at higher vol'
+
+
+def test_price_refuses_a_non_positive_tenor_rather_than_guessing():
+    """At expiry there is no theoretical price, only intrinsic — which is what
+    `payoff` is for. Returning something here would invent a number."""
+    import pytest
+    with pytest.raises(InvalidPricingInputsError):
+        bs_price(_bs(OptionType.CALL, t='0'))

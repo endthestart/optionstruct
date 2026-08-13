@@ -48,6 +48,7 @@ from optionstruct.pricing import (
     PricingInputs,
     bs_delta,
     bs_gamma,
+    bs_price,
     bs_theta,
     bs_vega,
     greeks,
@@ -77,7 +78,7 @@ from optionstruct.validators import (
     validate_vertical,
 )
 
-__version__ = '0.0.1'
+__version__ = '0.0.2'
 
 __all__ = [
     'DEFAULT_MULTIPLIER',
@@ -121,6 +122,7 @@ __all__ = [
     '__version__',
     'bs_delta',
     'bs_gamma',
+    'bs_price',
     'bs_theta',
     'bs_vega',
     'build_occ_symbol',

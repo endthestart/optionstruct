@@ -181,6 +181,33 @@ def _theta(tm: _Terms) -> float:
     return annual / 365.0
 
 
+def _price(tm: _Terms) -> float:
+    """Black-Scholes-Merton price, continuous dividend yield.
+
+    call = S e^{-qT} N(d1) - K e^{-rT} N(d2)
+    put  = K e^{-rT} N(-d2) - S e^{-qT} N(-d1)
+    """
+    if tm.option_type is OptionType.CALL:
+        return tm.s * tm.disc_q * _norm_cdf(tm.d1) - tm.k * tm.disc_r * _norm_cdf(tm.d2)
+    return tm.k * tm.disc_r * _norm_cdf(-tm.d2) - tm.s * tm.disc_q * _norm_cdf(-tm.d1)
+
+
+def bs_price(inputs: PricingInputs) -> Decimal:
+    """Theoretical price per share, in the underlying's currency.
+
+    The greeks here have always shared `_terms`; the price they are derivatives of
+    was the one thing missing, so any caller needing to value a position part-way
+    through its life had to reimplement Black-Scholes beside a module that already
+    computes d1 and d2.
+
+    At or past expiry the model is undefined (`_terms` refuses a non-positive
+    tenor). Intrinsic value is the caller's job at that point, and is exactly what
+    `optionstruct.payoff` computes -- there is no sense in which a 0-DTE contract
+    has a *theoretical* price.
+    """
+    return Decimal(str(_price(_terms(inputs))))
+
+
 def bs_delta(inputs: PricingInputs) -> Decimal:
     return Decimal(str(_delta(_terms(inputs))))
 

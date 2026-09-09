@@ -11,9 +11,9 @@ and wrapped back to ``Decimal`` at the boundary, so callers stay in Decimal.
 
 Units and conventions are chosen so greeks aggregate cleanly and line up with the
 values brokers stream:
-- Rates and yields are fractions per year (0.045 = 4.5%). Volatility likewise is
-  a fraction (0.18 = 18% annualized); a value > 1 is treated as a percentage and
-  divided by 100, matching how chains sometimes report IV.
+- Rates and yields are fractions per year (0.045 = 4.5%). Volatility is always
+  an annualized fraction (0.18 = 18%, 1.20 = 120%). Convert a provider's percentage
+  explicitly before calling; magnitude cannot identify a volatility unit.
 - ``delta`` is per $1 of underlying. ``gamma`` is per $1 (change in delta).
 - ``vega`` is per 1 percentage point of volatility (i.e. dV/dσ ÷ 100).
 - ``theta`` is per calendar day (i.e. the annualized dV/dt ÷ 365, typically
@@ -24,12 +24,14 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_DOWN, Decimal
-from math import erf, exp, log, pi, sqrt
+from math import erf, exp, isfinite, log, pi, sqrt
 
 from optionstruct.contracts import OptionContract
 from optionstruct.errors import InvalidPricingInputsError
 from optionstruct.legs import Leg
 from optionstruct.types import OptionType
+
+VOLATILITY_UNIT = 'annual_fraction'
 
 # Common price-increment grids. Products vary (many index options trade in
 # nickels); ``round_to_tick`` handles any grid.
@@ -50,13 +52,20 @@ def _norm_pdf(x: float) -> float:
     return _INV_SQRT_2PI * exp(-0.5 * x * x)
 
 
-def _normalize_volatility(volatility: Decimal) -> Decimal:
-    value = Decimal(str(volatility))
-    if value <= 0:
-        raise InvalidPricingInputsError('volatility must be positive')
-    if value > 1:  # given as a percentage (e.g. 18 meaning 18%)
-        value = value / Decimal('100')
-    return value
+def _finite_float(value: Decimal, name: str) -> float:
+    try:
+        parsed = Decimal(str(value))
+        if not parsed.is_finite() or not isfinite(result := float(parsed)):
+            raise ValueError('not finite in the analytical domain')
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise InvalidPricingInputsError(f'{name} must be finite and representable') from exc
+    return result
+
+
+def _result(value: float) -> Decimal:
+    if not isfinite(value):
+        raise InvalidPricingInputsError('pricing result is outside the finite analytical domain')
+    return Decimal(str(value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,21 +138,27 @@ class _Terms:
 
 
 def _terms(inputs: PricingInputs) -> _Terms:
-    s = float(Decimal(str(inputs.spot)))
-    k = float(Decimal(str(inputs.strike)))
-    t = float(Decimal(str(inputs.time_to_expiration_years)))
-    sigma = float(_normalize_volatility(inputs.volatility))
-    if s <= 0 or k <= 0 or t <= 0:
-        raise InvalidPricingInputsError('spot, strike, and tenor must be positive')
-    r = float(Decimal(str(inputs.risk_free_rate)))
-    q = float(Decimal(str(inputs.dividend_yield)))
-    sqrt_t = sqrt(t)
-    d1 = (log(s / k) + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t)
-    d2 = d1 - sigma * sqrt_t
+    s = _finite_float(inputs.spot, 'spot')
+    k = _finite_float(inputs.strike, 'strike')
+    t = _finite_float(inputs.time_to_expiration_years, 'tenor')
+    sigma = _finite_float(inputs.volatility, 'fractional volatility')
+    if min(s, k, t, sigma) <= 0:
+        raise InvalidPricingInputsError('spot, strike, tenor and volatility must be positive')
+    r = _finite_float(inputs.risk_free_rate, 'risk-free rate')
+    q = _finite_float(inputs.dividend_yield, 'dividend yield')
+    try:
+        sqrt_t = sqrt(t)
+        d1 = (log(s) - log(k) + (r - q + 0.5 * sigma * sigma) * t) / (sigma * sqrt_t)
+        d2 = d1 - sigma * sqrt_t
+        disc_q, disc_r = exp(-q * t), exp(-r * t)
+        if not all(isfinite(v) for v in (d1, d2, disc_q, disc_r)):
+            raise ValueError('nonfinite pricing terms')
+    except (ArithmeticError, ValueError) as exc:
+        raise InvalidPricingInputsError('inputs exceed the finite pricing domain') from exc
     return _Terms(
         option_type=OptionType.normalize(inputs.option_type),
         s=s, k=k, t=t, sigma=sigma, r=r, q=q,
-        d1=d1, d2=d2, disc_q=exp(-q * t), disc_r=exp(-r * t), sqrt_t=sqrt_t,
+        d1=d1, d2=d2, disc_q=disc_q, disc_r=disc_r, sqrt_t=sqrt_t,
     )
 
 
@@ -192,46 +207,47 @@ def _price(tm: _Terms) -> float:
     return tm.k * tm.disc_r * _norm_cdf(-tm.d2) - tm.s * tm.disc_q * _norm_cdf(-tm.d1)
 
 
+def _evaluate(function, terms: _Terms) -> Decimal:
+    try:
+        return _result(function(terms))
+    except ArithmeticError as exc:
+        raise InvalidPricingInputsError('pricing result is not representable') from exc
+
+
 def bs_price(inputs: PricingInputs) -> Decimal:
     """Theoretical price per share, in the underlying's currency.
 
-    The greeks here have always shared `_terms`; the price they are derivatives of
-    was the one thing missing, so any caller needing to value a position part-way
-    through its life had to reimplement Black-Scholes beside a module that already
-    computes d1 and d2.
-
-    At or past expiry the model is undefined (`_terms` refuses a non-positive
-    tenor). Intrinsic value is the caller's job at that point, and is exactly what
-    `optionstruct.payoff` computes -- there is no sense in which a 0-DTE contract
-    has a *theoretical* price.
+    Positive fractional tenor supports expiration-day valuation before the actual
+    cutoff. At or past expiry use the contract's settlement/payoff mechanics;
+    `_terms` refuses a non-positive tenor rather than inventing a live price.
     """
-    return Decimal(str(_price(_terms(inputs))))
+    return _evaluate(_price, _terms(inputs))
 
 
 def bs_delta(inputs: PricingInputs) -> Decimal:
-    return Decimal(str(_delta(_terms(inputs))))
+    return _evaluate(_delta, _terms(inputs))
 
 
 def bs_gamma(inputs: PricingInputs) -> Decimal:
-    return Decimal(str(_gamma(_terms(inputs))))
+    return _evaluate(_gamma, _terms(inputs))
 
 
 def bs_vega(inputs: PricingInputs) -> Decimal:
-    return Decimal(str(_vega(_terms(inputs))))
+    return _evaluate(_vega, _terms(inputs))
 
 
 def bs_theta(inputs: PricingInputs) -> Decimal:
-    return Decimal(str(_theta(_terms(inputs))))
+    return _evaluate(_theta, _terms(inputs))
 
 
 def greeks(inputs: PricingInputs) -> Greeks:
     """All four greeks in one pass (shares the d1/d2 computation)."""
     tm = _terms(inputs)
     return Greeks(
-        delta=Decimal(str(_delta(tm))),
-        gamma=Decimal(str(_gamma(tm))),
-        theta=Decimal(str(_theta(tm))),
-        vega=Decimal(str(_vega(tm))),
+        delta=_evaluate(_delta, tm),
+        gamma=_evaluate(_gamma, tm),
+        theta=_evaluate(_theta, tm),
+        vega=_evaluate(_vega, tm),
     )
 
 

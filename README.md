@@ -1,5 +1,15 @@
 # optionstruct
 
+## Pricing units
+
+`PricingInputs.volatility` is always an annual fraction: `Decimal('1.20')`
+means 120%. Convert a provider's explicitly percentage-valued field at its
+boundary (`Decimal('20') / Decimal('100')`); the library never guesses from
+magnitude. All pricing inputs and analytical outputs must be finite. Greeks
+use delta/gamma per $1 underlying, theta per calendar day, and vega per one
+percentage point of volatility. Positive fractional time remains valid on
+expiration day; zero/past expiration uses exact intrinsic/payoff math instead.
+
 Dependency-free, broker-agnostic modeling of multi-leg options structures in
 pure Python. Build a structure from legs, then ask it for exact
 expiration-payoff risk figures in real dollars: max loss, max profit,

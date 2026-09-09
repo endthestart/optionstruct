@@ -78,7 +78,7 @@ from optionstruct.validators import (
     validate_vertical,
 )
 
-__version__ = '0.0.2'
+__version__ = '0.0.3'
 
 __all__ = [
     'DEFAULT_MULTIPLIER',

@@ -88,9 +88,9 @@ def test_greeks_bundle_matches_individual_calls():
     assert g.vega == bs_vega(inp)
 
 
-def test_volatility_given_as_percentage_is_normalized():
+def test_provider_percentage_requires_explicit_conversion():
     as_frac = bs_delta(_inputs(OptionType.CALL, volatility=Decimal('0.20')))
-    as_pct = bs_delta(_inputs(OptionType.CALL, volatility=Decimal('20')))
+    as_pct = bs_delta(_inputs(OptionType.CALL, volatility=Decimal('20') / Decimal('100')))
     assert as_frac == as_pct
 
 

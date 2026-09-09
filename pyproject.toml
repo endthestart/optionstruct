@@ -1,6 +1,6 @@
 [project]
 name = "optionstruct"
-version = "0.0.2"
+version = "0.0.3"
 description = "Dependency-free, broker-agnostic modeling of multi-leg options structures: legs, payoff, defined-risk math."
 readme = "README.md"
 requires-python = ">=3.12"
